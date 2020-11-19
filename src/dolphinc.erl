@@ -21,6 +21,7 @@
 %% API
 -export([ start_link/0
         , start_link/1
+        , login/3
         , run/2
         ]).
 
@@ -55,12 +56,17 @@
 start_link() ->
     start_link([]).
 
+-spec start_link([option()]) -> {ok, pid()} | ignore | {error, term()}.
 start_link(Options) ->
     gen_server:start_link(?MODULE, [Options], []).
 
--spec run(pid(), binary()) -> term().
-run(C, Script) when is_binary(Script) ->
+-spec run(pid(), iodata()) -> term().
+run(C, Script) ->
     gen_server:call(C, {script, Script}).
+
+-spec login(pid(), binary(), binary()) -> ok | {error, term()}.
+login(C, Username, Password) ->
+    gen_server:call(C, {login, Username, Password}).
 
 %%--------------------------------------------------------------------
 %% gen_server callbacks
@@ -76,12 +82,12 @@ init([Options]) ->
                 {ok, Bytes} ->
                     SId = fd_connect(Bytes),
                     St = #st{host = Host,
-                                port = Port,
-                                sock = Sock,
-                                sid = SId,
-                                parser = init_parse_state()
-                               },
-                    NSt = may_do_login(St, Options),
+                             port = Port,
+                             sock = Sock,
+                             sid = SId,
+                             parser = init_parse_state()
+                            },
+                    {ok, NSt} = may_do_login(St, Options),
                     {ok, NSt};
                 {error, R} ->
                     {error, R}
@@ -90,17 +96,16 @@ init([Options]) ->
             {error, R}
     end.
 
-%% @private
-may_do_login(State, Options) ->
-    case proplists:get_value(username, Options) of
-        undefined ->
-            State;
-        Username ->
-            State
-    end.
+handle_call({login, Username, Password}, _From, St) ->
+    case do_login(Username, Password, St) of
+        {error, Reason} ->
+            shutdown({sock_err, Reason}, St);
+        {ok, NSt} ->
+            {reply, ok, NSt#st{username = Username, password = fun() -> Password end}}
+    end;
 
 handle_call({script, Script}, _From, St = #st{sock = Sock, sid = SId}) ->
-    ok = gen_tcp:send(Sock, fe_script(SId, Script)),
+    _ = gen_tcp:send(Sock, fe_script(SId, Script)),
     case recv_a_packet(St) of
         {error, Reason} ->
             shutdown({sock_err, Reason}, St);
@@ -128,6 +133,30 @@ code_change(_OldVsn, State, _Extra) ->
 %% Internal funcs
 %%--------------------------------------------------------------------
 
+%% @private
+may_do_login(St, Options) ->
+    case {proplists:get_value(username, Options),
+          proplists:get_value(password, Options)} of
+        {undefined, undefined} ->
+            St;
+        {undefined, _} ->
+            error(miss_password_option);
+        {Username, Password} ->
+            do_login(Username, Password, St)
+    end.
+
+%% @private
+do_login(Username, Password, St = #st{sock = Sock, sid = SId}) ->
+    Script = [<<"login(\"">>, Username, "\",\"", Password, "\")"],
+    _ = gen_tcp:send(Sock, fe_script(SId, Script)),
+    case recv_a_packet(St) of
+        {error, Reason} -> {error, Reason};
+        {ok, #{error := Err}, _} ->
+            {error, Err};
+        {ok, _, NSt} ->
+            {ok, NSt#st{username = Username, password = fun() -> Password end}}
+    end.
+
 recv_a_packet(St = #st{sock = Sock, parser = PSt}) ->
     case gen_tcp:recv(Sock, 0) of
         {ok, Bytes} ->
@@ -147,10 +176,10 @@ fe_connect() ->
     <<"API 0 8\nconnect\n">>.
 
 fe_script(SId, Script) ->
-    Len = integer_to_binary(byte_size(Script) + 7),
-    <<"API ", SId/binary, " ", Len/binary, " / 0_1_4_2\n",
-      "script\n",
-      Script/binary, "\n">>.
+    Len = integer_to_binary(iolist_size(Script) + 7),
+    ["API ", SId, " ", Len, " / 0_1_4_2\n",
+     "script\n",
+     Script].
 
 %%--------------------------------------------------------------------
 %% Parser
@@ -158,7 +187,7 @@ fe_script(SId, Script) ->
 init_parse_state() ->
     #{rest => <<>>}.
 
-parse(In, PSt = #{rest := Rest}) ->
+parse(In, _PSt = #{rest := Rest}) ->
     Bytes = <<Rest/binary, In/binary>>,
     case re:split(Bytes, "\n", [{parts, 3}]) of
         [Hdr, <<"OK">>, Data] ->
