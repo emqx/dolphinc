@@ -60,13 +60,15 @@ start_link() ->
 start_link(Options) ->
     gen_server:start_link(?MODULE, [Options], []).
 
--spec run(pid(), iodata()) -> term().
-run(C, Script) ->
-    gen_server:call(C, {script, Script}).
-
 -spec login(pid(), binary(), binary()) -> ok | {error, term()}.
 login(C, Username, Password) ->
     gen_server:call(C, {login, Username, Password}).
+
+-spec run(pid(), iodata())
+  -> {ok, Data :: term(), Msgs :: [term()]}
+   | {error, term()}.
+run(C, Script) ->
+    gen_server:call(C, {script, Script}).
 
 %%--------------------------------------------------------------------
 %% gen_server callbacks
@@ -109,8 +111,10 @@ handle_call({script, Script}, _From, St = #st{sock = Sock, sid = SId}) ->
     case recv_a_packet(St) of
         {error, Reason} ->
             shutdown({sock_err, Reason}, St);
-        {ok, Pkt, NSt} ->
-            {reply, Pkt, NSt}
+        {ok, #{error := Err}, NSt} ->
+            {reply, {error, Err}, NSt};
+        {ok, #{data := Data}, NSt} ->
+            {reply, {ok, Data, []}, NSt}
     end;
 
 handle_call(_Request, _From, State) ->
