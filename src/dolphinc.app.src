@@ -1,0 +1,11 @@
+{application, dolphinc,
+ [{description, "The DolphinDB erlang API implement"},
+  {vsn, "git"},
+  {registered, []},
+  {mod, {dolphinc_app, []}},
+  {applications, [kernel, stdlib]},
+  {env,[]},
+  {modules, []},
+  {licenses, ["Apache 2.0"]},
+  {links, []}
+ ]}.
