@@ -4,17 +4,14 @@ The DolphinDB erlang API implement
 
 ## Roadmap
 
-- [ ] Connect/ No value returned script
-- [ ] Login
-- [ ] Script Support
-- [ ] Function/ Variable api support
+- [x] Connect/ Login
+- [x] Script Support
+- [ ] Data Parser/ Function/ Variable api support
 - [ ] API2 Support
 - [ ] Integeration Tests
 - [ ] Benchmark
 
 ## Usage
-
-...
 
 ## License
 
