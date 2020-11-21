@@ -142,7 +142,7 @@ may_do_login(St, Options) ->
     case {proplists:get_value(username, Options),
           proplists:get_value(password, Options)} of
         {undefined, undefined} ->
-            St;
+            {ok, St};
         {undefined, _} ->
             error(miss_password_option);
         {Username, Password} ->
@@ -191,25 +191,31 @@ fe_script(SId, Script) ->
 init_parse_state() ->
     #{rest => <<>>}.
 
-parse(In, _PSt = #{rest := Rest}) ->
+parse(In, PSt = #{rest := Rest}) ->
     Bytes = <<Rest/binary, In/binary>>,
-    case re:split(Bytes, "\n", [{parts, 3}]) of
-        [Hdr, <<"OK">>, Data] ->
-            {SId, Cnt, Endian} = header(Hdr),
-            Pkt = #{header => #{sid => SId, cnt => Cnt, ed => Endian},
-                    data => Data
-                   },
-            {ok, Pkt, #{rest => <<>>}};
-        [Hdr, Error, Data] ->
-            {SId, Cnt, Endian} = header(Hdr),
-            Pkt = #{header => #{sid => SId, cnt => Cnt, ed => Endian},
-                    error => Error,
-                    data => Data
-                   },
-            {ok, Pkt, #{rest => <<>>}};
+    case binary:split(Bytes, <<"\n">>) of
+        [Hdr, Rest1] ->
+            [SId, Cnt0, Endian] = binary:split(Hdr, <<" ">>, [global]),
+            Cnt = binary_to_integer(Cnt0),
+            case binary:split(Rest1, <<"\n">>) of
+                [<<"OK">>, Rest2] ->
+                    Pkt = #{header => #{sid => SId, cnt => Cnt, ed => Endian},
+                            data => []
+                           },
+                    case Cnt == 0 of
+                        true ->
+                            {ok, Pkt, PSt#{rest => Rest2}};
+                        _ ->
+                            error({not_supported_data_return, Rest2})
+                    end;
+                [Err, Rest2] ->
+                    Pkt = #{header => #{sid => SId, cnt => Cnt, ed => Endian},
+                            error => Err
+                           },
+                    {ok, Pkt, PSt#{rest => Rest2}}
+            end;
         _ ->
-            %% XXX:
-            error({not_support_parted_stream, Bytes})
+            error({unknown_data_response, Bytes})
     end.
 
 fd_connect(Bytes) ->
