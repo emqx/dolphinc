@@ -19,24 +19,24 @@
 
 %% Data Type
 -define(DT_VOID,           0).
--define(DT_BOOL,           1). %% 1
--define(DT_BYTE,           2). %%
--define(DT_SHORT,          3). %% 2 
--define(DT_INT,            4). %% 4
--define(DT_LONG,           5). %% 8
--define(DT_DATE,           6). %% 4; 2013.06.13
--define(DT_MONTH,          7). %% 4; 2012.06M
--define(DT_TIME,           8). %% 4; 13:30:10.008
--define(DT_MINUTE,         9). %% 4; 13:30m
--define(DT_SECOND,        10). %% 4; 13:30:10
--define(DT_DATETIME,      11). %% 4; 2012.06.13 13:30:10 or 2012.06.13T13:30:10
--define(DT_TIMESTAMP,     12). %% 8; 2012.06.13 13:30:10.008 or 2012.06.13T13:30:10.008
--define(DT_NANOTIME,      13). %% 8; 13:30:10.008007006
--define(DT_NANOTIMESTAMP, 14). %% 8; 2012.06.13 13:30:10.008007006 or 2012.06.13T13:30:10.008007006
--define(DT_FLOAT,         15). %% 4; 2.1f
--define(DT_DOUBLE,        16). %% 8; 2.1
+-define(DT_BOOL,           1).
+-define(DT_CHAR,           2).
+-define(DT_SHORT,          3).
+-define(DT_INT,            4).
+-define(DT_LONG,           5).
+-define(DT_DATE,           6).
+-define(DT_MONTH,          7).
+-define(DT_TIME,           8).
+-define(DT_MINUTE,         9).
+-define(DT_SECOND,        10).
+-define(DT_DATETIME,      11).
+-define(DT_TIMESTAMP,     12).
+-define(DT_NANOTIME,      13).
+-define(DT_NANOTIMESTAMP, 14).
+-define(DT_FLOAT,         15).
+-define(DT_DOUBLE,        16).
 -define(DT_SYMBOL,        17).
--define(DT_STRING,        18). %% x; 采用UTF8编码，每个字符串用0做终止符
+-define(DT_STRING,        18).
 -define(DT_UUID,          19).
 -define(DT_FUNCTIONDEF,   20).
 -define(DT_HANDLE,        21).
@@ -44,8 +44,11 @@
 -define(DT_DATASOURCE,    23).
 -define(DT_RESOURCE,      24).
 -define(DT_ANY,           25).
--define(DT_DICTIONARY,    26).
--define(DT_OBJECT,        27).
+-define(DT_COMPRESS,      26).
+-define(DT_DICTIONARY,    27).
+-define(DT_DATEHOUR,      28).
+-define(DT_IPADDR,        30).
+-define(DT_INT128,        31).
 
 %% Data From
 -define(DF_SCALAR,         0).

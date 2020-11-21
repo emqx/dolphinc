@@ -16,23 +16,26 @@
 
 -module(dolphinc).
 
--behaviour(gen_server).
-
 %% API
 -export([ start_link/0
         , start_link/1
         , login/3
         , run/2
+        , run/3
         ]).
 
-%% gen_server callbacks
--export([ init/1
-        , handle_call/3
-        , handle_cast/2
-        , handle_info/2
-        , terminate/2
-        , code_change/3
+%% Callback
+-export([init/2]).
+
+%% Sys callbacks
+-export([ system_continue/3
+        , system_terminate/4
+        , system_code_change/4
+        , system_get_state/1
         ]).
+
+%% Internal callback
+-export([wakeup_from_hib/2]).
 
 -record(st,
         { host :: inet:socket_address() | inet:hostname()
@@ -42,12 +45,18 @@
         , username :: undefined | binary()
         , password :: undefined | function()
         , parser :: term()
+        , requests = queue:new()
         }).
 
 -type option()
-        :: {host, Host :: inet:socket_address() | inet:hostname()} %% default to 127.0.0.1
-         | {port, Port :: inet:port_number()} %% default to 8848
+        :: {host, inet:socket_address() | inet:hostname()} %% default to 127.0.0.1
+         | {port, inet:port_number()} %% default to 8848
+         | {username, iolist()}
+         | {password, iolist()}
          .
+
+%% TODO:
+-define(MAX_SEG_SIZE, 1048576). %% 1MB
 
 %%--------------------------------------------------------------------
 %% APIs
@@ -56,25 +65,34 @@
 start_link() ->
     start_link([]).
 
--spec start_link([option()]) -> {ok, pid()} | ignore | {error, term()}.
+-spec start_link([option()]) -> {ok, pid()}.
 start_link(Options) ->
-    gen_server:start_link(?MODULE, [Options], []).
+    Pid = proc_lib:spawn_link(?MODULE, init, [self(), Options]),
+    {ok, Pid}.
 
 -spec login(pid(), binary(), binary()) -> ok | {error, term()}.
 login(C, Username, Password) ->
-    gen_server:call(C, {login, Username, Password}).
+    Script = [<<"login(\"">>, Username, "\",\"", Password, "\")"],
+    run(C, Script).
 
--spec run(pid(), iodata())
+run(C, Script) ->
+    run(C, Script, infinity).
+
+-spec run(pid(), iodata(), timeout())
   -> {ok, Data :: term(), Msgs :: [term()]}
    | {error, term()}.
-run(C, Script) ->
-    gen_server:call(C, {script, Script}).
+run(C, Script, Timeout) ->
+    WaitTs = case Timeout of
+                 infinity -> infinity;
+                 _ -> Timeout + 1000
+             end,
+    gen_server:call(C, {script, Script, Timeout}, WaitTs).
 
 %%--------------------------------------------------------------------
-%% gen_server callbacks
+%% callbacks
 %%--------------------------------------------------------------------
 
-init([Options]) ->
+init(Parent, Options) ->
     Host = proplists:get_value(host, Options, "127.0.0.1"),
     Port = proplists:get_value(port, Options, 8848),
     case gen_tcp:connect(Host, Port, [binary, {active, false}]) of
@@ -90,61 +108,195 @@ init([Options]) ->
                              parser = init_parse_state()
                             },
                     {ok, NSt} = may_do_login(St, Options),
-                    {ok, NSt};
+                    inet:setopts(Sock, [{active, true}]),
+                    proc_lib:init_ack(Parent, {ok, self()}),
+                    run_loop(Parent, NSt);
                 {error, R} ->
-                    {error, R}
+                    exit(R)
             end;
         {error, R} ->
-            {error, R}
+             exit(R)
     end.
 
-handle_call({login, Username, Password}, _From, St) ->
-    case do_login(Username, Password, St) of
-        {error, Reason} ->
-            shutdown({sock_err, Reason}, St);
+%%--------------------------------------------------------------------
+%% Recv Loop
+
+run_loop(Parent, St) ->
+    hibernate(Parent, St).
+
+recvloop(Parent, St) ->
+    receive
+        {system, From, Request} ->
+            sys:handle_system_msg(Request, From, Parent, ?MODULE, [], St);
+        {'EXIT', Parent, Reason} ->
+            terminate(Reason, St);
+        Msg ->
+            process_msg([Msg], Parent, St)
+    after
+        5000 ->
+            hibernate(Parent, St)
+    end.
+
+hibernate(Parent, St) ->
+    proc_lib:hibernate(?MODULE, wakeup_from_hib, [Parent, St]).
+
+%% Maybe do something here later.
+wakeup_from_hib(Parent, St) -> recvloop(Parent, St).
+
+process_msg([], Parent, St) -> recvloop(Parent, St);
+
+process_msg([Msg|More], Parent, St) ->
+    case catch handle_msg(Msg, St) of
+        ok ->
+            process_msg(More, Parent, St);
         {ok, NSt} ->
-            {reply, ok, NSt#st{username = Username, password = fun() -> Password end}}
+            process_msg(More, Parent, NSt);
+        {ok, Msgs, NSt} ->
+            process_msg(append_msg(More, Msgs), Parent, NSt);
+        {stop, Reason} ->
+            terminate(Reason, St);
+        {stop, Reason, NSt} ->
+            terminate(Reason, NSt);
+        {'EXIT', Reason} ->
+            terminate(Reason, St)
+    end.
+
+-compile({inline, [append_msg/2]}).
+append_msg([], Msgs) when is_list(Msgs) ->
+    Msgs;
+append_msg([], Msg) -> [Msg];
+append_msg(Q, Msgs) when is_list(Msgs) ->
+    lists:append(Q, Msgs);
+append_msg(Q, Msg) ->
+    lists:append(Q, [Msg]).
+
+handle_msg({'$gen_call', From, Req}, St) ->
+    case handle_call(From, Req, St) of
+        {noreply, NSt} ->
+            {ok, NSt};
+        {reply, Reply, NSt} ->
+            gen_server:reply(From, Reply),
+            {ok, NSt};
+        {stop, Reason, NSt} ->
+            gen_server:reply(From, {error, Reason}),
+            stop(Reason, NSt)
     end;
 
-handle_call({script, Script}, _From, St = #st{sock = Sock, sid = SId}) ->
-    _ = gen_tcp:send(Sock, fe_script(SId, Script)),
-    case recv_a_packet(St) of
+handle_msg(Shutdown = {shutdown, _Reason}, St) ->
+   stop(Shutdown, St);
+
+handle_msg(Msg, St) ->
+    handle_info(Msg, St).
+
+-compile({inline, [shutdown/2]}).
+shutdown(Reason, St) ->
+    stop({shutdown, Reason}, St).
+
+-compile({inline, [stop/2]}).
+stop(Reason, St) ->
+    {stop, Reason, St}.
+
+%%--------------------------------------------------------------------
+%% Terminate
+
+terminate(Reason, _St) ->
+    logger:error("Terminated due to ~p", [Reason]),
+    exit(Reason).
+
+%%--------------------------------------------------------------------
+%% Sys callbacks
+
+system_continue(Parent, _Debug, St) ->
+    recvloop(Parent, St).
+
+system_terminate(Reason, _Parent, _Debug, St) ->
+    terminate(Reason, St).
+
+system_code_change(St, _Mod, _OldVsn, _Extra) ->
+    {ok, St}.
+
+system_get_state(St) -> {ok, St}.
+
+handle_call(From, Req = {script, _, _}, St = #st{sock = Sock, sid = SId, requests = Reqs}) ->
+    Msgs = drian_script_call([{From, Req}]),
+    NowTs = erlang:system_time(millisecond),
+
+    {Bytes0, NReqs} =
+        lists:foldl(fun({F, {script, S, Ts}}, {Bs, Rs}) ->
+            EndTs = case Ts of
+                        infinity -> infinity;
+                        _ -> NowTs + Ts
+                    end,
+            {[fe_script(SId, S) | Bs], queue:in({F, EndTs}, Rs)}
+        end, {[], Reqs}, Msgs),
+
+    NSt = St#st{requests = NReqs},
+    case gen_tcp:send(Sock, lists:reverse(Bytes0)) of
         {error, Reason} ->
-            shutdown({sock_err, Reason}, St);
-        {ok, #{error := Err}, NSt} ->
-            {reply, {error, Err}, NSt};
-        {ok, #{data := Data}, NSt} ->
-            {reply, {ok, Data, []}, NSt}
+            shutdown({sock_err, Reason}, NSt);
+        ok ->
+            {noreply, NSt}
     end;
 
-handle_call(_Request, _From, State) ->
-    Reply = ok,
-    {reply, Reply, State}.
+handle_call(_From, _Req, St) ->
+    {reply, {error, unknown_call}, St}.
 
-handle_cast(_Msg, State) ->
-    {noreply, State}.
+handle_info({tcp, _Sock, Bytes}, St) ->
+    handle_incoming(Bytes, St);
 
-handle_info(_Info, State) ->
-    {noreply, State}.
+handle_info({tcp_closed, _Sock}, St) ->
+    shutdown({sock_err, tcp_closed}, St);
 
-terminate(_Reason, _State) ->
-    ok.
+handle_info({tcp_error, _Sock, Reason}, St) ->
+    shutdown({sock_err, Reason}, St);
 
-code_change(_OldVsn, State, _Extra) ->
-        {ok, State}.
+handle_info(_Info, St) ->
+    {ok, St}.
 
 %%--------------------------------------------------------------------
 %% Internal funcs
 %%--------------------------------------------------------------------
+
+drian_script_call(Acc) ->
+    receive
+        {'$gen_call', From, Req} ->
+            drian_script_call([{From, Req}|Acc])
+    after
+        0 ->
+            lists:reverse(Acc)
+    end.
+
+handle_incoming(Bytes, St = #st{parser = PSt}) ->
+    NowTs = erlang:system_time(millisecond),
+    {ok, Pkts, NPSt} = parse(Bytes, PSt),
+    reply_requests(Pkts, NowTs, St#st{parser = NPSt}).
+
+reply_requests([], _, St) ->
+    {ok, St};
+reply_requests([Pkt|More], NowTs, St = #st{requests = Reqs}) ->
+    case queue:out(Reqs) of
+        {empty, NReqs} ->
+            shutdown({fatal_error, not_found_request}, St#st{requests = NReqs});
+        {{value, {From, EndTs}}, NReqs} ->
+            EndTs >= NowTs andalso begin
+                Reply = case Pkt of
+                            #{error := Error} -> {error, Error};
+                            #{data := Data} ->
+                                {ok, Data, maps:get(msgs, Pkt, [])}
+                        end,
+               gen_server:reply(From, Reply)
+            end,
+            reply_requests(More, NowTs, St#st{requests = NReqs})
+    end.
 
 %% @private
 may_do_login(St, Options) ->
     case {proplists:get_value(username, Options),
           proplists:get_value(password, Options)} of
         {undefined, undefined} ->
-            St;
+            {ok, St};
         {undefined, _} ->
-            error(miss_password_option);
+            {error, miss_password_option};
         {Username, Password} ->
             do_login(Username, Password, St)
     end.
@@ -164,14 +316,11 @@ do_login(Username, Password, St = #st{sock = Sock, sid = SId}) ->
 recv_a_packet(St = #st{sock = Sock, parser = PSt}) ->
     case gen_tcp:recv(Sock, 0) of
         {ok, Bytes} ->
-            {ok, Pkt, NPSt} = parse(Bytes, PSt),
+            {ok, [Pkt], NPSt} = parse(Bytes, PSt),
             {ok, Pkt, St#st{parser = NPSt}};
         {error, Reason} ->
             {error, Reason}
     end.
-
-shutdown(Reason, St) ->
-    {stop, {shutdown, Reason}, St}.
 
 %%--------------------------------------------------------------------
 %% Utils for Frame encoding
@@ -191,36 +340,46 @@ fe_script(SId, Script) ->
 init_parse_state() ->
     #{rest => <<>>}.
 
-parse(In, _PSt = #{rest := Rest}) ->
+parse(In, PSt = #{rest := Rest}) ->
     Bytes = <<Rest/binary, In/binary>>,
-    case re:split(Bytes, "\n", [{parts, 3}]) of
-        [Hdr, <<"OK">>, Data] ->
-            {SId, Cnt, Endian} = header(Hdr),
-            Pkt = #{header => #{sid => SId, cnt => Cnt, ed => Endian},
-                    data => Data
-                   },
-            {ok, Pkt, #{rest => <<>>}};
-        [Hdr, Error, Data] ->
-            {SId, Cnt, Endian} = header(Hdr),
-            Pkt = #{header => #{sid => SId, cnt => Cnt, ed => Endian},
-                    error => Error,
-                    data => Data
-                   },
-            {ok, Pkt, #{rest => <<>>}};
+    parse(Bytes, [], PSt#{rest => <<>>}).
+
+parse(<<>>, Acc, PSt) ->
+    {ok, lists:reverse(Acc), PSt};
+
+parse(Bytes, Acc, PSt) ->
+    case binary:split(Bytes, <<"\n">>) of
+        [Hdr, Rest1] ->
+            [SId, Cnt0, Endian] = binary:split(Hdr, <<" ">>, [global]),
+            Cnt = binary_to_integer(Cnt0),
+            case binary:split(Rest1, <<"\n">>) of
+                [<<"OK">>, Rest] ->
+                    Pkt = #{header => #{sid => SId, cnt => Cnt, ed => Endian},
+                            data => []
+                           },
+                    case Cnt == 0 of
+                        true ->
+                            parse(Rest, [Pkt|Acc], PSt);
+                        _ ->
+                            error({not_supported_data_return, Rest})
+                    end;
+                [Err, Rest] ->
+                    Pkt = #{header => #{sid => SId, cnt => Cnt, ed => Endian},
+                            error => Err
+                           },
+                    parse(Rest, [Pkt|Acc], PSt);
+                _ ->
+                    parse(<<>>, Acc, PSt#{rest => Bytes})
+            end;
         _ ->
-            %% XXX:
-            error({not_support_parted_stream, Bytes})
+            parse(<<>>, Acc, PSt#{rest => Bytes})
     end.
 
 fd_connect(Bytes) ->
     case re:split(Bytes, "\n", [{parts, 3}]) of
         [Hdr, <<"OK">>, _] ->
-            {SId,_,_} = header(Hdr),
+            [SId|_] = re:split(Hdr, " "),
             SId;
         _ ->
             error({failed_connect_to_server, Bytes})
     end.
-
-header(Hdr) ->
-    [SID, Cnt, Endian] = re:split(Hdr, " "),
-    {SID, Cnt, Endian}.
