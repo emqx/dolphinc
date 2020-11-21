@@ -46,6 +46,8 @@
         , password :: undefined | function()
         , parser :: term()
         , requests = queue:new()
+        , cnt_sent = 0
+        , cnt_recv = 0
         }).
 
 -type option()
@@ -134,6 +136,7 @@ recvloop(Parent, St) ->
             process_msg([Msg], Parent, St)
     after
         5000 ->
+            io:format("HHHHHHHHHHHHHIBER\n"),
             hibernate(Parent, St)
     end.
 
@@ -231,17 +234,20 @@ handle_call(From, Req = {script, _, _}, St = #st{sock = Sock, sid = SId, request
         end, {[], Reqs}, Msgs),
 
     NSt = St#st{requests = NReqs},
-    case gen_tcp:send(Sock, lists:reverse(Bytes0)) of
+    Bytes = lists:reverse(Bytes0),
+    case gen_tcp:send(Sock, Bytes) of
         {error, Reason} ->
             shutdown({sock_err, Reason}, NSt);
         ok ->
-            {noreply, NSt}
+            io:format("SEND: ~p~n", [Bytes]),
+            {noreply, incr(sent, length(Msgs), NSt)}
     end;
 
 handle_call(_From, _Req, St) ->
     {reply, {error, unknown_call}, St}.
 
 handle_info({tcp, _Sock, Bytes}, St) ->
+    io:format("RECV: ~p~n", [Bytes]),
     handle_incoming(Bytes, St);
 
 handle_info({tcp_closed, _Sock}, St) ->
@@ -256,6 +262,11 @@ handle_info(_Info, St) ->
 %%--------------------------------------------------------------------
 %% Internal funcs
 %%--------------------------------------------------------------------
+
+incr(sent, N1, St = #st{cnt_sent = N0}) ->
+    St#st{cnt_sent = N1+N0};
+incr(recv, N1, St = #st{cnt_recv = N0}) ->
+    St#st{cnt_recv = N1+N0}.
 
 drian_script_call(Acc) ->
     receive
@@ -273,7 +284,8 @@ handle_incoming(Bytes, St = #st{parser = PSt}) ->
 
 reply_requests([], _, St) ->
     {ok, St};
-reply_requests([Pkt|More], NowTs, St = #st{requests = Reqs}) ->
+reply_requests([Pkt|More], NowTs, St0 = #st{requests = Reqs}) ->
+    St = incr(recv, 1, St0),
     case queue:out(Reqs) of
         {empty, NReqs} ->
             shutdown({fatal_error, not_found_request}, St#st{requests = NReqs});
