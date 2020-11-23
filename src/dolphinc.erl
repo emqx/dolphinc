@@ -131,7 +131,7 @@ terminate(_Reason, _State) ->
     ok.
 
 code_change(_OldVsn, State, _Extra) ->
-        {ok, State}.
+    {ok, State}.
 
 %%--------------------------------------------------------------------
 %% Internal funcs
@@ -143,7 +143,7 @@ may_do_login(St, Options) ->
           proplists:get_value(password, Options)} of
         {undefined, undefined} ->
             {ok, St};
-        {undefined, _} ->
+        {_, undefined} ->
             error(miss_password_option);
         {Username, Password} ->
             do_login(Username, Password, St)
@@ -219,14 +219,10 @@ parse(In, PSt = #{rest := Rest}) ->
     end.
 
 fd_connect(Bytes) ->
-    case re:split(Bytes, "\n", [{parts, 3}]) of
+    case binary:split(Bytes, <<"\n">>, [global]) of
         [Hdr, <<"OK">>, _] ->
-            {SId,_,_} = header(Hdr),
+            [SId|_] = binary:split(Hdr, <<" ">>),
             SId;
         _ ->
-            error({failed_connect_to_server, Bytes})
+            error({unknown_data_response, Bytes})
     end.
-
-header(Hdr) ->
-    [SID, Cnt, Endian] = re:split(Hdr, " "),
-    {SID, Cnt, Endian}.

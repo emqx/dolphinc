@@ -1,0 +1,29 @@
+name: Run test cases
+
+on: [push, pull_request]
+
+jobs:
+  run_tests_cases:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v1
+      - uses: gleam-lang/setup-erlang@v1.1.0
+        with:
+          otp-version: 22.3
+      - name: Code analysis
+        run: |
+          make xref
+          make dialyzer
+      - name: Start DolphinDB
+        run: |
+          docker build .ci -t dolphindb
+          docker run -d --rm -p 8848:8848 dolphindb
+      - name: Run tests
+        run: |
+          make eunit
+          make ct
+      - uses: actions/upload-artifact@v1
+        if: failure()
+        with:
+          name: logs
+          path: _build/test/logs
